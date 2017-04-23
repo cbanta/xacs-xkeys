@@ -65,6 +65,7 @@ struct udev_xkeys_device {
 	char *path;
 	unsigned vendorId;
 	unsigned productId;
+	char *product;
 
 	struct udev_xkeys_device *next;
 };

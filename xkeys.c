@@ -157,8 +157,8 @@ void parseCmd(void *userdata, char *msg, int msglen){
 
 	// printf("cmd %3s\n", msg);
 	if( msglen >= 3 && strncmp(msg, "sys", 3) == 0 ){
-		// sys [r... &| g...]
-		// printf("...sys\n");
+		// sys [red &| green]
+		// NOTE: Set the System LED (top left)
 		uint8_t leds = 0;
 		argc = sscanf(msg,"sys %8s %8s", argv[0], argv[1]);
 		while( argc > 0 ){
@@ -174,8 +174,8 @@ void parseCmd(void *userdata, char *msg, int msglen){
 		report[1] = 186;
 		report[2] = leds;
 	}else if( msglen >= 4 && strncmp(msg, "isys", 4) == 0 ){
-		// isys [r...|g...] val(off,on,flash|blink)
-
+		// isys [red|green] val(off,on,flash|blink)
+		// NOTE: isys makes sys not work right - use one or the other
 		uint8_t idx = 0;
 		uint8_t val = 0;
 		argc = sscanf(msg,"isys %8s %8s", argv[0], argv[1]);
@@ -203,9 +203,11 @@ void parseCmd(void *userdata, char *msg, int msglen){
 		}
 	}else if( msglen >= 4 && strncmp(msg, "poll", 4) == 0 ){
 		report[1] = 177;
-	// }else if( msglen >= 6 && strncmp(msg, "reboot", 6) == 0 ){
-		// report[1] = 238;
+	}else if( msglen >= 6 && strncmp(msg, "reboot", 6) == 0 ){
+		report[1] = 238;
 	}else if( msglen >= 3 && strncmp(msg, "frq", 3) == 0 ){
+		// frq num(0-255)
+		// NOTE: This is freq LEDs flash. 0 is fast, 255 is slow
 		uint8_t frq = 0;
 		argc = sscanf(msg,"frq %hhu", &frq);
 		if( argc == 1 && frq > 0 ){
@@ -214,6 +216,7 @@ void parseCmd(void *userdata, char *msg, int msglen){
 		}
 	}else if( msglen >= 4 && strncmp(msg, "int ", 4) == 0 ){
 		// int blue(0-255) red(0-255)
+		// NOTE: Backlight intensity
 		uint8_t bank1 = 0;
 		uint8_t bank2 = 0;
 		argc = sscanf(msg,"int %hhu %hhu", &bank1, &bank2);
@@ -222,9 +225,30 @@ void parseCmd(void *userdata, char *msg, int msglen){
 			report[2] = bank1;
 			report[3] = bank2;
 		}
+	}else if( msglen >= 3 && strncmp(msg, "all", 3) == 0 ){
+		// all [red|blu] [on|off]
+		int8_t idx = -1;
+		int8_t val = -1;
+		argc = sscanf(msg,"all %8s %8s", argv[0], argv[1]);
+		if( argc > 0 ){
+			if( argv[0][0] == 'r' )
+				idx = 1;
+			if( argv[0][0] == 'b' )
+				idx = 0;
+		}
+		if( argc > 1 ){
+			if(argv[1][0] == 'o' && argv[1][1] == 'n')
+				val = 0x3f;
+			else if(argv[1][0] == 'o' && argv[1][1] == 'f')
+				val = 0;
+		}
+		if( idx >= 0 && val >= 0 ){
+			report[1] = 182;
+			report[2] = idx;
+			report[3] = val;
+		}
 	}else if( msglen > 3 && strncmp(msg, "set", 3) == 0 ){
 		// red btnid(0-79) val(off,on,flash|blink)
-		// printf("...set\n");
 		uint8_t led = -1;
 		uint8_t val = 0;
 		uint8_t bank = 0;
@@ -254,9 +278,9 @@ void parseCmd(void *userdata, char *msg, int msglen){
 		}
 	}
 	if( report[1] ){
-		// printf("\nREPORT ");
-		// print_buf(report, 36);
-		// printf("\n");
+		printf(" REPORT ");
+		print_buf(report, 36);
+		printf("\n");
 		// fflush(stdout);
 		write_data_t *d = (write_data_t*) calloc(1, sizeof(write_data_t) + sizeof(report));
 		d->req.data = d;
@@ -346,7 +370,9 @@ static void udev_add_cb(void *userdata, struct udev_xkeys_device *dev)
 		hidraw_close(state);
 	}
 	hidraw_open(state, dev->path);
-	mosquitto_publish(state->mqtt->mosq, NULL, "xacs/xkeys/events/dev", 3, "NEW", 1, false);
+	char buf[80];
+	int buflen = snprintf(buf, 80, "NEW %s", dev->product);
+	mosquitto_publish(state->mqtt->mosq, NULL, "xacs/xkeys/events/dev", buflen, buf, 1, false);
 }
 static void udev_remove_cb(void *userdata, struct udev_xkeys_device *dev)
 {

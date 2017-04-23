@@ -10,14 +10,18 @@
 
 
 static struct udev_xkeys_device *udev_xkeys_device_new(const char *path,
-	unsigned vendorId, unsigned productId)
+	unsigned vendorId, unsigned productId, const char *product)
 {
 	int plen = strlen(path);
+	int prlen = strlen(product);
 	struct udev_xkeys_device *dev = calloc(1,
-		sizeof(struct udev_xkeys_device) + plen+1);
+		sizeof(struct udev_xkeys_device) + plen+1 + prlen+1);
 	dev->path = (char*)(dev + 1);
+	dev->product = (char*)(dev + 1) + plen+1;
 	memcpy(dev->path, path, plen);
 	dev->path[plen] = 0;
+	memcpy(dev->product, product, prlen);
+	dev->product[prlen] = 0;
 	dev->vendorId = vendorId;
 	dev->productId = productId;
 	return dev;
@@ -44,29 +48,34 @@ static void udev_process_add(struct udev_state *state, struct udev_device *dev)
 
 	// printf("ADD Device\n");
 	// printf("   Node: %s\n", path);
+	// printf("   sysPath: %s\n", udev_device_get_syspath(dev));
+	// printf("   product: %s\n", udev_device_get_sysattr_value(dev,"product"));
 
 	dev = udev_device_get_parent_with_subsystem_devtype(
 		dev, "usb", "usb_interface");
 	if( !dev ) return;
-
 	interfaceNum = strtoul(udev_device_get_sysattr_value(dev,"bInterfaceNumber"), NULL, 16);
-	// printf("  sysPath: %s\n", udev_device_get_syspath(dev));
+	// printf("\n   sysPath: %s\n", udev_device_get_syspath(dev));
+	// printf("   product: %s\n", udev_device_get_sysattr_value(dev,"product"));
 	// printf("   bInterfaceNumber: %s\n", udev_device_get_sysattr_value(dev,"bInterfaceNumber"));
+
+	const char *product = udev_device_get_sysattr_value(udev_device_get_parent(dev),"product");
+	// printf("\n   sysPath: %s\n", udev_device_get_syspath(dev));
+	// printf("   product: %s\n", udev_device_get_sysattr_value(dev,"product"));
 
 	dev = udev_device_get_parent_with_subsystem_devtype(
 	       dev, "usb", "usb_device");
 	if( !dev ) return;
-
-	// printf("   VID/PID: %s %s\n", udev_device_get_sysattr_value(dev,"idVendor"), udev_device_get_sysattr_value(dev,"idProduct"));
+	vendorId = strtoul(udev_device_get_sysattr_value(dev,"idVendor"), NULL, 16);
+	productId = strtoul(udev_device_get_sysattr_value(dev,"idProduct"), NULL, 16);
+	// printf("\n   VID/PID: %s %s\n", udev_device_get_sysattr_value(dev,"idVendor"), udev_device_get_sysattr_value(dev,"idProduct"));
 	// printf("   sysPath: %s\n", udev_device_get_syspath(dev));
 	// printf("  sysPath: %s\n", udev_device_get_syspath(dev));
 
 
 
-	vendorId = strtoul(udev_device_get_sysattr_value(dev,"idVendor"), NULL, 16);
-	productId = strtoul(udev_device_get_sysattr_value(dev,"idProduct"), NULL, 16);
 	if( vendorId == VEND_ID && interfaceNum == INTERFACE_NUM ){
-		struct udev_xkeys_device *d = udev_xkeys_device_new(path, vendorId, productId);
+		struct udev_xkeys_device *d = udev_xkeys_device_new(path, vendorId, productId, product);
 		udev_xkeys_device_add(state, d);
 		if( !state->current ){
 			state->current = d;
