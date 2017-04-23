@@ -1,34 +1,28 @@
-/***************************************************
- libtool --mode=link gcc -o test1 -Ivendor/xkeys/piehid -Ivendor/libuv/include vendor/xkeys/piehid/hid-hidraw.c vendor/xkeys/piehid/PieHid32.c $(pkg-config --libs --cflags libusb-1.0) vendor/libuv/libuv.la -lpthread  -lmosquitto -ludev test1.c -static-libtool-libs
- libtool --mode=link gcc -o test1 -Ivendor/libuv/include  vendor/libuv/libuv.la -lpthread  -lmosquitto  test1.c -static-libtool-libs
-***************************************************/
 
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include <uv.h>
-#include <mosquitto.h>
+
+#include <execinfo.h>
+#include <signal.h>
+
+#include "xkeys.h"
 
 #define REPORT_SIZE 80   /* max size of a single usb report */
 
 
-typedef struct async_data {
-	char *data;
-	int len;
-	struct async_data *next;
-} async_data_t;
 
 typedef struct xkeys_state {
-	struct mosquitto *mosq;
+	struct mqtt_state *mqtt;
+	struct udev_state *udev;
 	uv_device_t *hidraw;
 	uint8_t lastz;
 	int got_lastz;
 
-	uv_async_t async;
-	async_data_t *adata;
-	uv_mutex_t adata_m;
+	const char *hidraw_open_pending_close;
+	bool hidraw_closing;
 } xkeys_state_t;
 
 typedef struct write_data {
@@ -36,19 +30,6 @@ typedef struct write_data {
 	uv_buf_t bufs[1];
 } write_data_t;
 
-
-uv_loop_t *loop;
-
-const char *mqtt_broker_host = "localhost";
-const int mqtt_broker_port = 1883;
-const int mqtt_keepalive = 10;
-
-
-void mqtt_cb_msg(struct mosquitto *mosq, void *userdata, const struct mosquitto_message *msg);
-void mqtt_cb_connect(struct mosquitto *mosq, void *userdata, int result);
-void mqtt_cb_subscribe(struct mosquitto *mosq, void *userdata, int mid, int qos_count, const int *granted_qos);
-void mqtt_cb_disconnect(struct mosquitto *mosq, void *userdat, int rc);
-void mqtt_cb_log(struct mosquitto *mosq, void *userdata, int level, const char *str);
 
 void hidraw_write(uv_write_t *req, int status);
 
@@ -67,35 +48,21 @@ void print_buf(char *data, int len)
 	// printf("\n");
 }
 
-void async_data_add(xkeys_state_t *state, const char *data, const int len){
-	async_data_t *n = (async_data_t*) malloc(sizeof(async_data_t) + len);
-	n->len = len;
-	n->data = (char*)(n + 1);
-	n->next = NULL;
-	memcpy(n->data, data, len);
-	uv_mutex_lock(&state->adata_m);
-	if( state->adata == NULL ){
-		state->adata = n;
-	}else{
-		async_data_t *p = state->adata;
-		while( p->next != NULL ){
-			p = p->next;
-		}
-		p->next = n;
-	}
-	uv_mutex_unlock(&state->adata_m);
+void handler(int sig) {
+  void *array[10];
+  size_t size;
+
+  fflush(stdout);
+
+  // get void*'s for all entries on the stack
+  size = backtrace(array, 10);
+
+  // print out all the frames to stderr
+  fprintf(stderr, "Error: signal %d:\n", sig);
+  backtrace_symbols_fd(array, size, STDERR_FILENO);
+  exit(1);
 }
 
-async_data_t * async_data_get(xkeys_state_t *state){
-	uv_mutex_lock(&state->adata_m);
-	async_data_t *d = state->adata;
-	if( d ){
-		state->adata = d->next;
-		d->next = NULL;
-	}
-	uv_mutex_unlock(&state->adata_m);
-	return d;
-}
 
 
 
@@ -166,9 +133,9 @@ void parseSplat(xkeys_state_t *state, uint8_t *data){
 	}
 	ADDCHAR(pos, poslen, 0);
 
-	// printf("\n[BUF]%s\n", buf);
+	printf("  DATA %s\n", buf);
 
-	mosquitto_publish(state->mosq, NULL, "xacs/xkeys/events", strlen(buf), buf, 1, false);
+	mosquitto_publish(state->mqtt->mosq, NULL, "xacs/xkeys/events", strlen(buf), buf, 1, false);
 }
 
 
@@ -180,7 +147,8 @@ void parseSplat(xkeys_state_t *state, uint8_t *data){
 
 
 
-void parseCmd(xkeys_state_t *state, char *msg, int msglen){
+void parseCmd(void *userdata, char *msg, int msglen){
+	struct xkeys_state *state = (struct xkeys_state *) userdata;
 	char report[36];
 	char argv[8][8];
 	int argc = 0;
@@ -290,60 +258,17 @@ void parseCmd(xkeys_state_t *state, char *msg, int msglen){
 		// print_buf(report, 36);
 		// printf("\n");
 		// fflush(stdout);
-		write_data_t *d = (write_data_t*) malloc(sizeof(write_data_t) + sizeof(report));
+		write_data_t *d = (write_data_t*) calloc(1, sizeof(write_data_t) + sizeof(report));
 		d->req.data = d;
 		d->bufs[0].base = (void*)(d + 1);
 		d->bufs[0].len = sizeof(report);
 		memcpy(d->bufs[0].base, report, 36);
-		uv_write(&d->req, (uv_stream_t*)state->hidraw, d->bufs, 1, hidraw_write);
+		if( state->hidraw && !state->hidraw_closing )
+			uv_write(&d->req, (uv_stream_t*)state->hidraw, d->bufs, 1, hidraw_write);
 	}
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-void mosq_thread_read(uv_async_t *uv){
-	// printf("mosq_thread_read\n");
-	xkeys_state_t *state = (xkeys_state_t*) uv->data;
-	async_data_t *d = async_data_get(state);
-	while( d ){
-		parseCmd(state, d->data, d->len);
-		free(d);
-		d = async_data_get(state);
-	}
-}
 
 
 
@@ -370,133 +295,86 @@ void hidraw_write(uv_write_t *req, int status){
 	free(req->data);
 }
 
-int main(int argc, char **argv){
+
+static void hidraw_open(struct xkeys_state *state, const char *path)
+{
+	if( state->hidraw ){
+		state->hidraw_open_pending_close = path;
+		return;
+	}
+	printf("Opening %s\n", path);
+	uv_device_t *hidraw = calloc(1, sizeof(uv_device_t));
+	hidraw->data = (void*)state;
+	state->hidraw = hidraw;
+	uv_device_init(uv_default_loop(), hidraw, path, O_RDWR);
+	// uv_stream_set_blocking(&hidraw, 1);
+	uv_read_start((uv_stream_t*)hidraw, hidraw_alloc, hidraw_read);
+}
+
+static void hidraw_close_finished(uv_handle_t *uv)
+{
+	xkeys_state_t *state = (xkeys_state_t*)uv->data;
+	uv_device_t *hidraw = state->hidraw;
+	state->hidraw = NULL;
+	state->hidraw_closing = false;
+
+	uv_unref((uv_handle_t*)hidraw);
+	free(hidraw);
+	if( state->hidraw_open_pending_close ){
+		const char *path = state->hidraw_open_pending_close;
+		state->hidraw_open_pending_close = NULL;
+		hidraw_open(state, path);
+	}
+}
+static void hidraw_close(struct xkeys_state *state)
+{
+	if( state->hidraw_closing == true ) return;
+	state->hidraw_closing = true;
+
+	printf("Closing hidraw device\n");
+	uv_read_stop((uv_stream_t*)state->hidraw);
+	uv_close((uv_handle_t*)state->hidraw, hidraw_close_finished);
+}
+
+
+static void udev_add_cb(void *userdata, struct udev_xkeys_device *dev)
+{
+	struct xkeys_state *state = (struct xkeys_state*) userdata;
+	printf("[ADD CB] New Device %s [%04x:%04x]\n", dev->path, dev->vendorId, dev->productId);
+
+	if( state->hidraw ){
+		hidraw_close(state);
+	}
+	hidraw_open(state, dev->path);
+	mosquitto_publish(state->mqtt->mosq, NULL, "xacs/xkeys/events/dev", 3, "NEW", 1, false);
+}
+static void udev_remove_cb(void *userdata, struct udev_xkeys_device *dev)
+{
+	struct xkeys_state *state = (struct xkeys_state*) userdata;
+	printf("[REMOVE CB] Device Gone %s [%04x:%04x]\n", dev->path, dev->vendorId, dev->productId);
+
+	hidraw_close(state);
+	mosquitto_publish(state->mqtt->mosq, NULL, "xacs/xkeys/events/dev", 4, "GONE", 1, false);
+}
+
+
+
+int main(int argc, char **argv)
+{
+	signal(SIGSEGV, handler);
 
 	xkeys_state_t state;
 	memset(&state, 0, sizeof(state));
 
-	loop = uv_default_loop();
+	state.mqtt = mqtt_init("xkeys", true, "::");
+	mqtt_add_sub(state.mqtt, "xacs/xkeys/cmd", &state, parseCmd);
 
-	char *hiddev;
-	if( argc > 1 ){
-		hiddev = argv[1];
-	}else{
-		hiddev = "/dev/hidraw0";
-	}
-	printf("Opening %s\n", hiddev);
+	state.udev = udev_init(&state, udev_add_cb, udev_remove_cb);
 
-
-    char clientid[24];
-    mosquitto_lib_init();
-    memset(clientid, 0, 24);
-    snprintf(clientid, 23, "xkeys_%d", getpid());
-    state.mosq = mosquitto_new(clientid, true, (void*)&state);
-    if(!state.mosq){
-        fprintf(stderr, "Error: Out of memory.\n");
-        return -1;
-    }
-    mosquitto_connect_callback_set(state.mosq, mqtt_cb_connect);
-    mosquitto_message_callback_set(state.mosq, mqtt_cb_msg);
-    // mosquitto_subscribe_callback_set(state.mosq, mqtt_cb_subscribe);
-    // mosquitto_disconnect_callback_set(state.mosq, mqtt_cb_disconnect);
-    // mosquitto_log_callback_set(state.mosq, mqtt_cb_log);
-
-    // int running = 1;
-    while(1) {
-        if(mosquitto_connect_bind(state.mosq, mqtt_broker_host, mqtt_broker_port, mqtt_keepalive, "::")){
-            printf("Unable to connect, host: %s, port: %d\n",
-                   mqtt_broker_host, mqtt_broker_port);
-            sleep(2);
-            continue;
-        }
-        break;
-    }
-
-
-
-
-    uv_device_t hidraw;
-    hidraw.data = (void*)&state;
-    state.hidraw = &hidraw;
-    uv_device_init(loop, &hidraw, hiddev, O_RDWR);
-    uv_read_start((uv_stream_t*)&hidraw, hidraw_alloc, hidraw_read);
-
-
-    state.async.data = (void*)&state;
-    uv_mutex_init(&state.adata_m);
-    uv_async_init(loop, &state.async, mosq_thread_read);
-    mosquitto_loop_start(state.mosq);
-
-
-	int ret = uv_run(loop, UV_RUN_DEFAULT);
-	mosquitto_destroy(state.mosq);
-	mosquitto_lib_cleanup();
+	int ret = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+	mqtt_close(state.mqtt);
+	udev_cleanup(state.udev);
 	return ret;
 }
 
 
-/* Called when a message arrives to the subscribed topic,
- */
-void mqtt_cb_msg(struct mosquitto *mosq, void *userdata, const struct mosquitto_message *msg){
-	xkeys_state_t *state = (xkeys_state_t*)userdata;
-	int i;
-
-	if( strcmp(msg->topic, "xacs/xkeys/cmd") == 0 ){
-		// printf("\n[CMD]%s\n", msg->payload);
-		async_data_add(state, msg->payload, msg->payloadlen);
-		uv_async_send(&state->async);
-	// }else{
-	// 	printf("\nReceived msg on topic: %s\n", msg->topic);
-	// 	if(msg->payload != NULL){
-	// 	    printf("Payload: %s\n", (char *) msg->payload);
-	// 	}
-	}
-}
-
-void mqtt_cb_connect(struct mosquitto *mosq, void *userdata, int result){
-    if(!result){
-        mosquitto_subscribe(mosq, NULL, "xacs/xkeys/cmd/#", 1);
-    }
-    else {
-        printf("\nMQTT subscribe failed\n");
-    }
-}
-
-// void mqtt_cb_subscribe(struct mosquitto *mosq, void *userdata, int mid,
-//                         int qos_count, const int *granted_qos)
-// {
-// 	int i;
-//     printf("\nSubscribed (mid: %d): %d\n", mid, granted_qos[0]);
-//     for(i=1; i<qos_count; i++){
-//         printf("\t %d", granted_qos[i]);
-//     }
-// }
-
-// void
-// mqtt_cb_disconnect(struct mosquitto *mosq, void *userdat, int rc)
-// {
-//     printf("\nMQTT disconnect, error: %d: %s\n",rc, mosquitto_strerror(rc));
-// }
-
-// void
-// mqtt_cb_log(struct mosquitto *mosq, void *userdata,
-//                   int level, const char *str)
-// {
-//     switch(level){
-//         case MOSQ_LOG_DEBUG:
-//             // printf("DBG: %s\n",str);
-//             break;
-//         case MOSQ_LOG_INFO:
-//         case MOSQ_LOG_NOTICE:
-//             printf("INF: %s\n",str);
-//             break;
-//         case MOSQ_LOG_WARNING:
-//             printf("WRN: %s\n",str);
-//             break;
-//         case MOSQ_LOG_ERR:
-//             printf("ERR: %s\n",str);
-//             break;
-//         default:
-//             printf("Unknown MOSQ loglevel!");
-//     }
-// }
