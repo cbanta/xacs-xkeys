@@ -23,12 +23,14 @@ This event will be `NEW` followed by string of device product at startup or when
 
 Send to ```xacs/xkeys/cmd```
 
-|`sys [red &| green]` | Changes System LED in top left corner |
-|`isys [red|green] val(off,on,flash|blink)` | Changes System LED in top left corner - isys allows blink, but dont use both sys and isys |
-|`poll`| Generates an event of current status |
-|`reboot`| Like unplugging and plugging in device |
-|`frq num(0-255)`| LED Blink frequency |
-|`int blue(0-255) red(0-255)`| LED Backlight Intensity |
-|`all [red|blu] [on|off]`| Change backlight for all leds at once |
-|`red btnid(0-79) val(off,on,flash|blink)`| Set individual backlight led |
+| Command | Description |
+| --- | --- |
+| `sys [red or green]` | Changes System LED in top left corner |
+| `isys [red or green] val(off,on,flash or blink)` | Changes System LED in top left corner - isys allows blink, but dont use both sys and isys |
+| `poll` | Generates an event of current status |
+| `reboot` | Like unplugging and plugging in device |
+| `frq num(0-255)` | LED Blink frequency |
+| `int blue(0-255) red(0-255)` | LED Backlight Intensity |
+| `all [red or blu] [on or off]` | Change backlight for all leds at once |
+| `red btnid(0-79) val(off,on,flash or blink)` | Set individual backlight led |
 
